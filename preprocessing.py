@@ -74,3 +74,61 @@ def load_date_frame(data_name):
     df = pd.read_csv(path, parse_dates=['start', 'finish'], infer_datetime_format=True)
     print("Data loaded")
     return df
+
+def get_frame_for_prediction(data_name):
+
+    path = get_data_path(data_name)
+    df = pd.read_csv(path)
+    columns_of_interest = ['WORKORDERKEY', 'WOCATEGORY', 'ORIGINATINGSQUAWK', 'ITEMNUMBER',
+                           #'DESCRIPTION',
+
+                           # squawk
+                           'TOTALSQUAWKCOST', 'TOTALSQUAWKREVENUE', # these 2 are the targets variables
+                           'TOTALSQUAWKESTIMATEDCOST','TOTALSQUAWKESTIMATEDREVENUE',
+
+                           # labor
+                           #'TOTALLABORCOST','TOTALLABORREVENUE',   # we can only use only estimates for prediction
+                           'TOTALLABORESTIMATEDCOST', 'TOTALLABORESTIMATEDREVENUE',
+
+                           # parts
+                           #'TOTALPARTSCOST','TOTALPARTSREVENUE',  # we can only use only estimates for prediction
+                           'TOTALPARTSESTIMATEDCOST', 'TOTALPARTSESTIMATEDREVENUE',
+                            ]
+
+    df = df[columns_of_interest]
+    df['is_WA']= (df.ORIGINATINGSQUAWK!=0.0)
+
+    df_group = df.groupby(['WORKORDERKEY', 'WOCATEGORY', 'ITEMNUMBER', 'is_WA']).sum().reset_index(level=(1,2,3))\
+                                                                                .drop('ORIGINATINGSQUAWK', axis=1)
+
+    #for WA only keep 2 features (to predict)
+    df_wa = df_group.loc[df_group.is_WA==True, ['TOTALSQUAWKCOST', 'TOTALSQUAWKREVENUE']].add_prefix('WA_')
+    df_wa = df_wa.reset_index(level=0).groupby('WORKORDERKEY').sum()
+
+
+    #for original squawk :
+    df_origin = df_group.loc[df_group.is_WA==False].drop('is_WA', axis=1)
+
+
+    # for original squawk, we collect the info for each item:
+    frame_to_concat = [df_group['WOCATEGORY'].reset_index().drop_duplicates().set_index('WORKORDERKEY')]
+
+    for item in df_origin.ITEMNUMBER.unique():
+        frame_to_concat.append(df_origin.loc[df_origin.ITEMNUMBER==item].drop(['WOCATEGORY','ITEMNUMBER'], axis=1)\
+                                                                    .add_prefix('I{}_'.format(item)))
+
+
+    frame_to_concat.append(df_wa)
+    df_full = pd.concat(frame_to_concat, axis=1)
+    print('Final shape : {}'.format(df_full.shape))
+    print('Imputing missing values with zeros')
+    n_nan = df_full.isnull().values.sum()
+    n_val = df_full.shape[0]*df_full.shape[1]
+    print('{} missing values imputted ({}%)'.format(df_full.isnull().values.sum(), np.round(100*n_nan/n_val, 2)))
+    df_full.fillna(0,inplace=True)
+
+    #os.makedirs(os.path.join('prep_data', 'date_frame'), exist_ok=True)
+    #save_path = os.path.join('prep_data', 'date_frame', data_name)
+    #df_date.to_csv(save_path, index=False, date_format= '%Y/%m/%d' )
+
+    print('Date_frame saved here : {}'.format(save_path))
