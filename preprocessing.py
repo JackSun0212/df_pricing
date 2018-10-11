@@ -75,28 +75,30 @@ def load_date_frame(data_name):
     print("Data loaded")
     return df
 
+
 def get_frame_for_prediction(data_name):
 
     path = get_data_path(data_name)
     df = pd.read_csv(path)
-    columns_of_interest = ['WORKORDERKEY', 'WOCATEGORY', 'ORIGINATINGSQUAWK', 'ITEMNUMBER',
-                           #'DESCRIPTION',
 
+    columns_of_interest = ['WORKORDERKEY', 'WOCATEGORY', 'ORIGINATINGSQUAWK', 'ITEMNUMBER',
                            # squawk
                            'TOTALSQUAWKCOST', 'TOTALSQUAWKREVENUE', # these 2 are the targets variables
                            'TOTALSQUAWKESTIMATEDCOST','TOTALSQUAWKESTIMATEDREVENUE',
-
                            # labor
-                           #'TOTALLABORCOST','TOTALLABORREVENUE',   # we can only use only estimates for prediction
                            'TOTALLABORESTIMATEDCOST', 'TOTALLABORESTIMATEDREVENUE',
-
                            # parts
-                           #'TOTALPARTSCOST','TOTALPARTSREVENUE',  # we can only use only estimates for prediction
                            'TOTALPARTSESTIMATEDCOST', 'TOTALPARTSESTIMATEDREVENUE',
                             ]
 
     df = df[columns_of_interest]
+    df = df.loc[df.WOCATEGORY.isin(['C-2 (Maintenance only)',
+                                    'B-3 (Inspections, Modifications, Maintenance)',
+                                    'C-1 (Maintenance, Modifications)',
+                                    'B-4 (Inspections, Maintenance)'])]
+
     df['is_WA']= (df.ORIGINATINGSQUAWK!=0.0)
+
 
     df_group = df.groupby(['WORKORDERKEY', 'WOCATEGORY', 'ITEMNUMBER', 'is_WA']).sum().reset_index(level=(1,2,3))\
                                                                                 .drop('ORIGINATINGSQUAWK', axis=1)
@@ -106,29 +108,52 @@ def get_frame_for_prediction(data_name):
     df_wa = df_wa.reset_index(level=0).groupby('WORKORDERKEY').sum()
 
 
-    #for original squawk :
+    #for original squawk, same : sum over all items
     df_origin = df_group.loc[df_group.is_WA==False].drop('is_WA', axis=1)
+
+    df_origin_tot = df_origin.drop(['WOCATEGORY','ITEMNUMBER'], axis=1)
+    df_origin_tot = df_origin_tot.reset_index(level=0).groupby('WORKORDERKEY').sum()
+
+
+    frame_to_concat = [df_group['WOCATEGORY'].reset_index().drop_duplicates().set_index('WORKORDERKEY')]
+    frame_to_concat.append(df_origin_tot)
+    frame_to_concat.append(df_wa)
 
 
     # for original squawk, we collect the info for each item:
-    frame_to_concat = [df_group['WOCATEGORY'].reset_index().drop_duplicates().set_index('WORKORDERKEY')]
-
     for item in df_origin.ITEMNUMBER.unique():
-        frame_to_concat.append(df_origin.loc[df_origin.ITEMNUMBER==item].drop(['WOCATEGORY','ITEMNUMBER'], axis=1)\
-                                                                    .add_prefix('I{}_'.format(item)))
+        frame_to_concat.append(df_origin.loc[df_origin.ITEMNUMBER==item] \
+                                        .drop(['WOCATEGORY','ITEMNUMBER','TOTALSQUAWKCOST','TOTALSQUAWKREVENUE'],axis=1) \
+                                        .add_prefix('I{}_'.format(item)))
 
 
-    frame_to_concat.append(df_wa)
     df_full = pd.concat(frame_to_concat, axis=1)
+
     print('Final shape : {}'.format(df_full.shape))
     print('Imputing missing values with zeros')
     n_nan = df_full.isnull().values.sum()
     n_val = df_full.shape[0]*df_full.shape[1]
     print('{} missing values imputted ({}%)'.format(df_full.isnull().values.sum(), np.round(100*n_nan/n_val, 2)))
+
     df_full.fillna(0,inplace=True)
 
-    #os.makedirs(os.path.join('prep_data', 'date_frame'), exist_ok=True)
-    #save_path = os.path.join('prep_data', 'date_frame', data_name)
-    #df_date.to_csv(save_path, index=False, date_format= '%Y/%m/%d' )
+    os.makedirs(os.path.join('prep_data', 'model_frame'), exist_ok=True)
+    save_path = os.path.join('prep_data', 'model_frame', data_name)
+    df_full.to_csv(save_path)
 
-    print('Date_frame saved here : {}'.format(save_path))
+    print('Model_frame saved here : {}'.format(save_path))
+
+
+def load_frame_for_prediction(data_name):
+
+    path = os.path.join('prep_data', 'model_frame', data_name)
+    if not os.path.exists(path):
+        print("Could not find preprocessed data.")
+        print("Starting preprocessing ...")
+        get_frame_for_prediction(data_name)
+        print("Loading data...")
+
+
+    df = pd.read_csv(path)
+    print("Data loaded")
+    return df.set_index('WORKORDERKEY')
