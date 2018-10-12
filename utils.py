@@ -24,8 +24,14 @@ def get_data_path(data_name):
     elif data_name == 'fleet':
         path = os.path.join(data_dir, 'Fleet size.csv')
     elif data_name == 'wo_lookup':
-        path = os.path.join(data_dir, 'WorkOrderKey_AircraftLookup.csv')
+        path = os.path.join(data_dir, 'WorkOrderKey_AircraftLookup.xlsx')
     else:
         raise Error("Invalid name, please use : wilmington, reno, littlerock, fleet, wo_lookup" )
-
     return path
+
+def load_(data_name):
+    path = get_data_path(data_name)
+    if data_name == 'fleet':
+        return pd.read_csv(path, encoding='latin-1')
+    elif data_name == 'wo_lookup':
+        return pd.read_excel(path)
