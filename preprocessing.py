@@ -14,22 +14,6 @@ from matplotlib.lines import Line2D
 
 
 
-days = set(np.arange(1, 32))
-months = set(np.arange(1, 13))
-years = set(np.arange(2009, 2019))
-
-def transform_to_datetime(x):
-    date = x.split(' ')[0]
-    m,d,y = date.split('/')
-
-    # consistency check
-    if (int(m) in months) & (int(d) in days) & (int(y) in years):
-        return pd.Timestamp(year=int(y), month=int(m), day=int(d), unit='D')
-    else:
-        print('Problem with date : {}'.format(x))
-        return np.nan
-
-
 
 def get_date_frame(data_name):
 
@@ -103,8 +87,10 @@ def get_frame_for_prediction(data_name):
     df_group = df.groupby(['WORKORDERKEY', 'WOCATEGORY', 'ITEMNUMBER', 'is_WA']).sum().reset_index(level=(1,2,3))\
                                                                                 .drop('ORIGINATINGSQUAWK', axis=1)
 
-    #for WA only keep 2 features (to predict)
-    df_wa = df_group.loc[df_group.is_WA==True, ['TOTALSQUAWKCOST', 'TOTALSQUAWKREVENUE']].add_prefix('WA_')
+    #for WA only keep 2 features (to predict) and their estimates(as baselines)
+    df_wa = df_group.loc[df_group.is_WA==True,
+                    ['TOTALSQUAWKCOST', 'TOTALSQUAWKREVENUE',
+                     'TOTALSQUAWKESTIMATEDCOST','TOTALSQUAWKESTIMATEDREVENUE']].add_prefix('WA_')
     df_wa = df_wa.reset_index(level=0).groupby('WORKORDERKEY').sum()
 
 
@@ -129,7 +115,6 @@ def get_frame_for_prediction(data_name):
 
     df_full = pd.concat(frame_to_concat, axis=1)
 
-    print('Final shape : {}'.format(df_full.shape))
     print('Imputing missing values with zeros')
     n_nan = df_full.isnull().values.sum()
     n_val = df_full.shape[0]*df_full.shape[1]
@@ -137,9 +122,30 @@ def get_frame_for_prediction(data_name):
 
     df_full.fillna(0,inplace=True)
 
+    # adding aircraft info:
+    lookup = load_('wo_lookup')
+    lookup = lookup.drop(['ORG','AIRCRAFTSERIALNUMBER'], axis=1).set_index('WORKORDERKEY')
+    df_lu = df_full.join(lookup)
+
+    # removing rows with negative costs
+    print('Removing rows with negative costs')
+    col_neg_val = []
+    test_negative_values = (df_lu<0).sum()
+    columns_with_neg_val = test_negative_values.iloc[test_negative_values.nonzero()].index
+    for col in columns_with_neg_val:
+        if 'cost' in col.lower():
+            col_neg_val.append(col)
+
+    df_final = df_lu.iloc[((df_lu[col_neg_val]<0).sum(axis=1)==0).nonzero()]
+
+    print('Encoding categorical features')
+    df_final['wo_category'] = df_final.WOCATEGORY.apply(encode_categories)
+    df_final['aircraft_model'] = df_final.AIRCRAFTMODELNUMBER.apply(encode_aircraft_model)
+    df_final.drop(['WOCATEGORY', 'AIRCRAFTMODELNUMBER'], axis=1, inplace=True)
+
     os.makedirs(os.path.join('prep_data', 'model_frame'), exist_ok=True)
     save_path = os.path.join('prep_data', 'model_frame', data_name)
-    df_full.to_csv(save_path)
+    df_final.to_csv(save_path)
 
     print('Model_frame saved here : {}'.format(save_path))
 
@@ -157,3 +163,55 @@ def load_frame_for_prediction(data_name):
     df = pd.read_csv(path)
     print("Data loaded")
     return df.set_index('WORKORDERKEY')
+
+
+def get_iqr_bound(x, coef=2):
+    q1,q3 = x.quantile([.25,.75])
+    iqr = q3-q1
+    return q3+coef*iqr
+
+
+def get_outliers(data):
+    outliers=set()
+
+    #drop when revenue or expected revenue is 0
+    outliers.update(data[data.TOTALSQUAWKREVENUE==0].index)
+    outliers.update(data[data.TOTALSQUAWKESTIMATEDREVENUE==0].index)
+
+    #drop when cost or estimate cost is very low
+    min_= data.TOTALSQUAWKCOST.quantile(0.03)
+    outliers.update(data[data.TOTALSQUAWKCOST<min_].index)
+    outliers.update(data[data.TOTALSQUAWKESTIMATEDCOST<min_].index)
+
+    # With 2IQR rule, drop high values for:
+    # cost, expected cost and work arising cost
+    # revenue, expected revenue and work arising revenue
+    max_ = get_iqr_bound(data.TOTALSQUAWKCOST)
+    outliers.update(data[data.TOTALSQUAWKCOST>max_].index)
+    max_ = get_iqr_bound(data.TOTALSQUAWKESTIMATEDCOST)
+    outliers.update(data[data.TOTALSQUAWKESTIMATEDCOST>max_].index)
+    max_ = get_iqr_bound(data.WA_TOTALSQUAWKCOST)
+    outliers.update(data[data.WA_TOTALSQUAWKCOST>max_].index)
+    max_ = get_iqr_bound(data.TOTALSQUAWKREVENUE)
+    outliers.update(data[data.TOTALSQUAWKREVENUE>max_].index)
+    max_ = get_iqr_bound(data.TOTALSQUAWKESTIMATEDREVENUE)
+    outliers.update(data[data.TOTALSQUAWKESTIMATEDREVENUE>max_].index)
+    max_ = get_iqr_bound(data.WA_TOTALSQUAWKREVENUE)
+    outliers.update(data[data.WA_TOTALSQUAWKREVENUE>max_].index)
+
+    print('Outliers represents {}% of the dataset'.format(np.round(100*len(outliers)/len(data),1)))
+    return outliers
+
+
+def remove_outliers(df):
+    df_1 = df[df.wo_category==1].drop('wo_category', axis=1)
+    df_2 = df[df.wo_category==2].drop('wo_category', axis=1)
+    df_3 = df[df.wo_category==3].drop('wo_category', axis=1)
+    df_4 = df[df.wo_category==4].drop('wo_category', axis=1)
+
+    clean_1 = df_1.drop(get_outliers(df_1))
+    clean_2 = df_2.drop(get_outliers(df_2))
+    clean_3 = df_3.drop(get_outliers(df_3))
+    clean_4 = df_4.drop(get_outliers(df_4))
+
+    return [clean_1,clean_2, clean_3, clean_4]
